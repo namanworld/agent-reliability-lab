@@ -2,7 +2,7 @@ import pytest
 
 from arl.metrics import percentile
 
-LATENCIES = [120, 80, 300, 150, 100]  # deliberately unsorted
+LATENCIES = [121, 80, 300, 150, 100]  # deliberately unsorted
 
 
 def test_median_of_odd_count():
