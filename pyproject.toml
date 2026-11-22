@@ -1,7 +1,7 @@
 [project]
 name = "arl"
 version = "0.1.0"
-description = "Add your description here"
+description = "An open-source tool that traces, tests, attacks and benchmarks AI agents, plus PulseAgent-lite, a small coding agent that ARL tests."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
