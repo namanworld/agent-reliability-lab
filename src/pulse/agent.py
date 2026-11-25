@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from pulse.llm.base import LLMProvider, LLMResponse, ThinkingMode, ToolCall
+from pulse.tools.redact import redact
 from pulse.tools.registry import Tool, ToolCallError, ToolExecutionError, validate_call
 
 SYSTEM_PROMPT = """You are PulseAgent, a coding assistant for one Python repository.
@@ -40,6 +41,7 @@ class ToolRun:
     ok: bool
     output: str
     ms: float
+    redactions: int = 0
 
 
 @dataclass
@@ -84,7 +86,7 @@ class AgentResult:
                     },
                     "tools": [
                         {"name": t.name, "arguments": t.arguments, "ok": t.ok,
-                         "ms": round(t.ms, 1), "output": t.output}
+                         "ms": round(t.ms, 1), "redactions": t.redactions, "output": t.output}
                         for t in s.tools
                     ],
                 }
@@ -106,6 +108,7 @@ class Agent:
         thinking: ThinkingMode = "off",
         system: str = SYSTEM_PROMPT,
         on_step=None,  # optional callback(Step) for live printing
+        redact_output: bool = True,  # hide secret-shaped strings in tool output
     ):
         self.provider = provider
         self.tools = {t.name: t for t in tools}
@@ -116,6 +119,7 @@ class Agent:
         self.thinking = thinking
         self.system = system
         self.on_step = on_step
+        self.redact_output = redact_output
 
     def run(self, question: str) -> AgentResult:
         t0 = time.perf_counter()
@@ -182,7 +186,11 @@ class Agent:
             output, ok = tool.run(args, self.repo_root), True
         except (ToolCallError, ToolExecutionError) as e:
             output, ok = f"Error: {e}", False
-        return ToolRun(call.name, call.arguments_json, ok, output, (time.perf_counter() - t0) * 1000)
+        redactions = 0
+        if self.redact_output:
+            output, redactions = redact(output)
+        return ToolRun(call.name, call.arguments_json, ok, output,
+                       (time.perf_counter() - t0) * 1000, redactions)
 
     def _report(self, step: Step) -> None:
         if self.on_step:
