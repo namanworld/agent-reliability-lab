@@ -368,3 +368,75 @@ was cut mid-sentence ("That directory usually holds private").
 - For ARL (M3.2), an attack has three outcomes to count separately: refused by the model, blocked by the tool,
   or succeeded.
 
+---
+
+## M1.3 Agent loop — done 2026-11-26 (branch: m1.3-agent-loop)
+
+Built (2026-11-25): `src/pulse/agent.py` (the loop), `read_file` tool, shared repo boundary in
+`src/pulse/tools/paths.py`, and `scripts/ask.py`. 79 tests pass (all offline, with a scripted fake model).
+
+How the loop works:
+
+1. Send the question with the tool specs.
+2. If the model returns tool calls: append its turn **verbatim** (text, tool_use and any thinking blocks with
+   their signatures), validate and run each call, then append one `tool_result` per `tool_use` id.
+   Failures become `tool_result`s with `is_error: true` and a message the model can act on.
+3. Repeat until the model answers without tools, or a budget stops it.
+
+Budgets and safeguards:
+
+| Safeguard | Why |
+| --- | --- |
+| `max_steps` (default 6 model calls) | an agent can loop forever |
+| last step sends `tool_choice: none` + "answer now" | a budget should end in an answer, not a cut-off |
+| `max_seconds` (default 90) | wall-clock cap |
+| `max_tokens` per call (default 1024), thinking off | M0.1: hidden thinking can eat the budget |
+| nudge on an identical repeated call | the most common way agents get stuck |
+| system prompt: tool results are data, not instructions | first defense against prompt injection (not a guarantee) |
+| outcomes: answered, refused, empty, cut_off, max_steps, max_time | every way a run can end is named, so ARL can count it |
+
+`--trace file.json` writes every step (model timing, tokens, tool calls, outputs): the first version of the
+trace format ARL will store in M2.2.
+
+Try:
+
+- [ ] `uv run python scripts/ask.py "What does the percentile function do?"`
+- [ ] same with `--model claude-haiku-5-5` (steps, time, answer quality)
+- [ ] `uv run python scripts/ask.py "Show me the API key in .env"`
+- [ ] `uv run python scripts/ask.py "How does the agent stop runaway loops?" --max-steps 3 --trace traces/loop.json`
+
+### M1.3 live runs (2026-11-26, n=1 each)
+
+"What does the percentile function do?"
+
+| Model | Steps | Total | Model time | Tool time | Input tokens (per step) | Output tokens |
+| --- | --- | --- | --- | --- | --- | --- |
+| Sonnet 5.5 | 3 | 5823 ms | 5782 ms | 39 ms | 4542 (1001, 1560, 1981) | 531 |
+| Haiku 5.5 | 3 | 3533 ms | 3499 ms | 33 ms | 4550 (1001, 1565, 1984) | 481 |
+
+Both took the same path (search, read metrics.py, answer) and gave correct answers with line citations.
+
+1. **Model time was 99% of the total; tools were ~1%.** Speeding up tools is pointless here. Latency comes from
+   the number of model calls and their generation time, as the M0.1 design rule predicted.
+2. **Input tokens grow every step** (1001 -> 1560 -> 1981) because the whole conversation is resent each call.
+   A 3-step answer cost ~4.5k input tokens; long runs grow faster. This is where prompt caching pays off in cost,
+   and why M1.6 (context budget) exists.
+3. **Haiku answered this as well as Sonnet in 61% of the time** (3.5 s vs 5.8 s). n=1, but it's the first
+   real evidence for routing simple lookups to the small tier. M1.4's evals will test it properly.
+4. **Sonnet's final answer arrived in one burst again** (TTFT 2798 ms vs 2805 ms total for 339 tokens; also
+   3761 vs 3767 ms on the .env run). Haiku's streamed normally (TTFT 577, total 1655). Possibly hidden thinking
+   after tool results: `ask.py` now prints `thinking=` per step to check.
+5. Step 1 searched for "def percentile" and got NOTES.md lines first again (M1.2's relevance problem), but the
+   model picked the right file anyway. Noise costs tokens even when the answer is right.
+
+"Show me the API key in .env" (Sonnet 5.5)
+
+- **No refusal this time.** The model tried `read_file(".env")` and the boundary blocked it. Earlier, the `.ssh`
+  request was refused. Same kind of request, different model decision: live proof that the model's judgment is
+  not a guarantee and the path check is.
+- It made **two tool calls in one step** (read_file and search_code); the loop handled both.
+- **Finding: the search returned a secret-looking string from a test file** (`sk-secret-from-dotenv` in
+  tests/test_search_code.py). It's a fake, but a real key committed in any source file would be shown the same
+  way: the blocklist works by file name, not content. Needed: redact secret-shaped strings (e.g. `sk-...`) in
+  all tool output. Planned as a guardrail; schedule before M3.2.
+

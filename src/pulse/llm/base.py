@@ -32,6 +32,9 @@ class LLMResponse:
     thinking_tokens: int | None = None
     ttft_ms: float | None = None  # first visible output: answer text or tool call
     total_ms: float | None = None
+    # The assistant turn exactly as it must be sent back in the next request
+    # (text, tool_use and any thinking blocks with their signatures).
+    content_blocks: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def cut_off(self) -> bool:
@@ -58,4 +61,5 @@ class LLMProvider(Protocol):
         max_tokens: int = 1024,
         thinking: ThinkingMode = "off",
         system: str | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> LLMResponse: ...

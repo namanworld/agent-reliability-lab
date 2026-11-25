@@ -35,5 +35,6 @@ class ReplayProvider:
         max_tokens: int = 1024,
         thinking: ThinkingMode = "off",
         system: str | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> LLMResponse:
         return parse_events(load_recording(self.path))

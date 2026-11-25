@@ -22,7 +22,6 @@ Try it directly:
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import os
 import re
 import shutil
@@ -31,10 +30,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pulse.tools.paths import BLOCKED_DIRS, BLOCKED_GLOBS, is_blocked, resolve_inside
 from pulse.tools.registry import Tool, ToolExecutionError
 
-BLOCKED_GLOBS = [".env*", "*.pem", "*.key", "id_rsa*", "*.p12"]
-BLOCKED_DIRS = {".git", ".venv", "node_modules", "__pycache__"}
 MAX_LINE_CHARS = 200
 MAX_OUTPUT_CHARS = 4000
 MAX_FILE_BYTES = 1_000_000
@@ -56,35 +54,6 @@ class SearchCodeArgs(BaseModel):
     max_results: int = Field(
         default=10, ge=1, le=50, description="Maximum number of matching lines to return."
     )
-
-
-# ---------- the security boundary ----------
-
-
-def resolve_inside(repo_root: Path, user_path: str) -> Path:
-    """Resolve user_path against repo_root and refuse anything that lands outside it.
-
-    resolve() follows symlinks and collapses '..', so the check happens on the real
-    location, not on how the path is spelled.
-    """
-    root = repo_root.resolve()
-    target = (root / user_path).resolve()
-    if target != root and root not in target.parents:
-        raise ToolExecutionError(
-            f"Path '{user_path}' is outside the repository. Use a path relative to the repository root."
-        )
-    if not target.exists():
-        raise ToolExecutionError(f"Path '{user_path}' does not exist in the repository.")
-    if not target.is_dir():
-        raise ToolExecutionError(f"Path '{user_path}' is a file; search_code takes a directory.")
-    return target
-
-
-def is_blocked(rel_path: str) -> bool:
-    parts = Path(rel_path).parts
-    if any(p in BLOCKED_DIRS for p in parts):
-        return True
-    return any(fnmatch.fnmatch(parts[-1], g) for g in BLOCKED_GLOBS)
 
 
 # ---------- backends: each returns (matches, error); a match is (rel_path, line_no, text) ----------
