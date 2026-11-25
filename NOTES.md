@@ -229,3 +229,84 @@ Design rules this produced:
 
 Deferred: the local Qwen3-4B comparison (does prompt length matter without a network floor?) runs when the
 local provider adapter is built in M1.1.
+
+---
+
+## M1.1 One tool call — done 2026-11-25 (branch: m1.1-tool-call)
+
+Built: `pulse/llm` (provider types, Anthropic streaming parser, record/replay) and `pulse/tools`
+(Pydantic-based tool specs and `validate_call`). 24 tests pass offline.
+
+First live runs (2026-11-25, n=1 each, each run opened a new connection):
+
+| Prompt | Model | Result | TTFT | Total | Out tokens |
+| --- | --- | --- | --- | --- | --- |
+| "Where is the percentile function defined?" | Sonnet 5.5 | valid `search_code({"query": "def percentile"})` | 3649 ms | 3854 ms | 64 |
+| same, `--show-schema` run | Sonnet 5.5 | same valid call | 2262 ms | 2578 ms | 69 |
+| "Hi, how are you?" | Sonnet 5.5 | no tool call, 113-token answer | 2246 ms | 3174 ms | 113 |
+| same as row 1 | Haiku 5.5 | **400 error** | - | - | - |
+
+Findings:
+
+1. **Turning thinking off is model-specific.** Sonnet 5.5 accepts `{"type": "between_tools"}` and rejects
+   `"disabled"`; Haiku 5.5 is the opposite. The provider now looks the value up per model (`THINKING_OFF`) and
+   fails loudly for unknown models instead of guessing. This is what the adapter layer is for.
+2. **Sonnet writes a preamble before the tool call** ("I'll search for the percentile function definition.").
+   It counts as visible text, so TTFT stops there, but it adds ~15 output tokens (~150 ms at 10 ms/token)
+   to every agent step. To test: `--terse`.
+3. **TTFT of 2.2-3.6 s is much higher than M0.1's ~0.8 s.** Unexplained so far. Differences: tools and a
+   system prompt are sent (640 input tokens), and every run here was a cold connection (n=1). Measure before
+   concluding: `--runs 6` with and without `--no-tools`.
+4. Sonnet correctly skipped the tool for small talk, but answered with 113 tokens: wordiness is latency.
+
+### M1.1 experiments (2026-11-25, `--runs 6` = 1 warm-up + n=5, one connection, run one after another)
+
+| Setting | Median TTFT | Median total | Notes |
+| --- | --- | --- | --- |
+| Sonnet 5.5, no tools (`--no-tools`) | 1385 ms | 1886 ms | answered in text (up to 306 tokens): a different task |
+| Sonnet 5.5, tools, `--terse` | 2476 ms | 2750 ms | still wrote a shorter preamble ("Let me search for it."); one run had TTFT 6105 ms |
+| Haiku 5.5, tools | 2587 ms | 2589 ms | **TTFT ~= total** |
+| Sonnet 5.5, tools (default) | not run | | |
+
+Findings:
+
+1. **For Haiku with tools, TTFT equalled total time (2587 vs 2589 ms).** At ~7 ms/token, 67 output tokens
+   take ~470 ms to generate, so if they were streamed, the first text would arrive ~470 ms before the end.
+   Hypothesis: when a response contains a tool call, the preamble text and the call reach the client in one
+   burst at the end. **Not confirmed (see the recording below):** that run showed text streaming normally.
+2. What did hold: the tool-call arguments arrive within ~20 ms, so **"start executing the tool from partial
+   JSON"** (an idea from the original one-pager) can save at most ~20 ms here.
+3. **The no-tools TTFT (1385 ms) is higher than M0.1's ~800 ms** for a similar prompt, so the network was slower
+   this evening. These rows ran one after another, so they can't be compared precisely; any decision that
+   depends on the gap needs an interleaved run.
+4. `--terse` shortened the preamble but didn't remove it: instructions reduce wordiness, not reliably to zero.
+
+### Recorded Haiku tool call (n=1, `tests/fixtures/haiku_search_call.jsonl`)
+
+TTFT 894 ms, total 1079 ms, 67 output tokens. Event timeline (ms since request):
+
+| ms | Event |
+| --- | --- |
+| 887 | message_start |
+| 894 | first text_delta ("I'll search...") |
+| 1057 | rest of the text, block ends |
+| 1058 | tool_use block starts (name and id known) |
+| 1059-1077 | 5 input_json_delta fragments |
+| 1079 | message_stop |
+
+- Text streamed normally: the "everything at once" hypothesis was wrong for this run. The 2587 vs 2589 ms
+  medians earlier remain unexplained; the network was much slower then (this run: ~1.1 s total).
+- The tool's **name is known ~20 ms before its arguments are complete.** That is the only window for
+  pre-warming a tool, and it's too small to matter on this API.
+- The same request took ~2.6 s earlier in the evening and ~1.1 s now: time-of-day variation is larger than
+  most effects we have tried to measure. Comparisons must be interleaved.
+- This recording is now a real test fixture (`test_real_recording_replays_to_a_valid_call`). 25 tests pass.
+
+Open: Sonnet with tools, `--runs 6` (default settings) was never run.
+
+**M1.1 outcome:** the agent can ask for a tool, the call is rebuilt from the stream, and every malformed
+call is rejected with a message the model can act on. Provider quirks (thinking off differs per model) live
+in the adapter, not in the agent.
+- [ ] `uv run python scripts/tool_call_demo.py --runs 6 --terse` (does removing the preamble save time?)
+- [ ] `uv run python scripts/tool_call_demo.py --model claude-haiku-5-5 --runs 6`
+- [ ] `--record tests/fixtures/search_call.jsonl`, then a test that replays the real recording

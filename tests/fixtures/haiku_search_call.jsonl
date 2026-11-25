@@ -1,0 +1,15 @@
+{"ms": 887.2, "event": {"message": {"id": "msg_011ChPt6LR39eoXGQDLbeDkv", "content": [], "model": "claude-haiku-5-5", "role": "assistant", "type": "message", "usage": {"cache_creation": {"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 0}, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "inference_geo": "global", "input_tokens": 640, "output_tokens": 5, "service_tier": "standard", "speed": "standard"}}, "type": "message_start"}}
+{"ms": 891.6, "event": {"content_block": {"text": "", "type": "text"}, "index": 0, "type": "content_block_start"}}
+{"ms": 893.6, "event": {"delta": {"text": "I'll search the", "type": "text_delta"}, "index": 0, "type": "content_block_delta"}}
+{"ms": 1057.2, "event": {"delta": {"text": " repository for the percentile function", "type": "text_delta"}, "index": 0, "type": "content_block_delta"}}
+{"ms": 1057.3, "event": {"delta": {"text": " definition.", "type": "text_delta"}, "index": 0, "type": "content_block_delta"}}
+{"ms": 1057.3, "event": {"index": 0, "type": "content_block_stop"}}
+{"ms": 1057.7, "event": {"content_block": {"id": "toolu_01LLxojcvmFGG5ssBZrBVUzL", "caller": {"type": "direct"}, "input": {}, "name": "search_code", "type": "tool_use"}, "index": 1, "type": "content_block_start"}}
+{"ms": 1058.7, "event": {"delta": {"partial_json": "", "type": "input_json_delta"}, "index": 1, "type": "content_block_delta"}}
+{"ms": 1077.0, "event": {"delta": {"partial_json": "{\"query", "type": "input_json_delta"}, "index": 1, "type": "content_block_delta"}}
+{"ms": 1077.1, "event": {"delta": {"partial_json": "\": \"def", "type": "input_json_delta"}, "index": 1, "type": "content_block_delta"}}
+{"ms": 1077.1, "event": {"delta": {"partial_json": " percen", "type": "input_json_delta"}, "index": 1, "type": "content_block_delta"}}
+{"ms": 1077.2, "event": {"delta": {"partial_json": "tile\"}", "type": "input_json_delta"}, "index": 1, "type": "content_block_delta"}}
+{"ms": 1077.2, "event": {"index": 1, "type": "content_block_stop"}}
+{"ms": 1078.3, "event": {"delta": {"stop_reason": "tool_use"}, "type": "message_delta", "usage": {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 640, "output_tokens": 67, "output_tokens_details": {"thinking_tokens": 0}}}}
+{"ms": 1079.1, "event": {"type": "message_stop"}}

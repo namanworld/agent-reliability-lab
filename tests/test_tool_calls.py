@@ -107,3 +107,18 @@ def test_thinking_off_differs_per_model():
 def test_unknown_model_fails_loudly_instead_of_guessing():
     with pytest.raises(ValueError, match="THINKING_OFF"):
         thinking_off_param("claude-some-new-model")
+
+
+# ---------- a real recorded response (Haiku 5.5, 2026-11-25) ----------
+
+REAL = Path(__file__).parent / "fixtures" / "haiku_search_call.jsonl"
+
+
+def test_real_recording_replays_to_a_valid_call():
+    resp = ReplayProvider(REAL).complete([{"role": "user", "content": "x"}])
+    assert resp.stop_reason == "tool_use"
+    assert [c.name for c in resp.tool_calls] == ["search_code"]
+    args = validate_call(resp.tool_calls[0], TOOLS)
+    assert "percentile" in args.query
+    assert resp.ttft_ms is not None and resp.total_ms is not None
+    assert resp.ttft_ms < resp.total_ms
