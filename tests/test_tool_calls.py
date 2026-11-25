@@ -45,6 +45,16 @@ def test_tool_with_no_arguments_becomes_empty_object():
     assert parse_events(events).tool_calls[0].arguments_json == "{}"
 
 
+def test_refusal_is_detected():
+    events = [
+        (None, {"type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "I can't help with that. That directory usually holds private"}}),
+        (None, {"type": "message_delta", "delta": {"stop_reason": "refusal"}}),
+    ]
+    resp = parse_events(events)
+    assert resp.refused and not resp.empty and not resp.tool_calls
+
+
 def test_response_with_nothing_is_empty():
     events = [(None, {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}})]
     resp = parse_events(events)

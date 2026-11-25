@@ -8,6 +8,7 @@ model sees and the check the code runs can never drift apart.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,11 +22,17 @@ class ToolCallError(Exception):
     so the agent loop (M1.3) can send it back and let the model correct itself."""
 
 
+class ToolExecutionError(Exception):
+    """A valid call that failed while running (path outside the repo, timeout, ...).
+    Also written for the model, which can retry with different arguments."""
+
+
 @dataclass
 class Tool:
     name: str
     description: str
     args_model: type[BaseModel]
+    run: Callable[..., str] | None = None  # (validated_args, repo_root) -> text for the model
 
     def spec(self) -> dict[str, Any]:
         """The tool definition in the Anthropic `tools` format."""
