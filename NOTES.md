@@ -1,0 +1,193 @@
+# NOTES — Agent Reliability Lab
+
+Project journal: measurements, decisions, surprises and interview answers.
+Plan: https://claude.ai/artifact/1GHs1beWux2Ksmo6YsrdYw
+
+## Benchmark checklist (run before every measurement)
+
+1. Memory pressure is green (close Chrome and other heavy apps).
+2. Discard the first request after every server restart (cold start).
+3. Change only one variable at a time.
+4. Record `finish_reason`, token counts and `cached_tokens` alongside every time.
+5. Report the median of 10+ runs and always state n.
+
+---
+
+## M0.0 Repo, tests and CI — done 2026-11-23
+
+- Repo: https://github.com/namanworld/agent-reliability-lab (uv, ruff, pytest, GitHub Actions).
+- `percentile()` uses **linear interpolation** (same as NumPy's default and Prometheus histograms).
+  Nearest-rank would give different answers on small samples, so the method is fixed and documented.
+- Empty input raises `ValueError` instead of returning 0: a fake "0 ms" hides missing data.
+- `setup-uv` is pinned to a commit SHA, not a tag (supply-chain safety).
+
+### Learning: percentiles need enough samples
+
+Experiment: 19 requests around 500 ms, plus one request that was either 509 ms or 3000 ms (Wi-Fi hiccup).
+
+| List | P50 | P99 |
+| --- | --- | --- |
+| without hiccup | 500.5 ms | 509.8 ms |
+| with hiccup | 500.5 ms | 2526.9 ms |
+
+- One slow request out of 20 moved P99 by ~5x and P50 not at all. With n=20, P99 sits at
+  position 0.99 x 19 = 18.81, which is almost the slowest request.
+- Rule of thumb: P50 needs ~10-20 runs, P95 ~100+, P99 ~500+. Always report n with a percentile.
+- Round only when displaying (`2526.899999999997` is floating-point noise).
+
+---
+
+## M0.1 Baseline timing — in progress (branch: users/namanjain/m0.1-measure)
+
+### Step 1: Serve a local model (2026-11-23)
+
+Setup: `mlx_lm.server --model mlx-community/Qwen3-4B-4bit --port 8080`, mlx-lm added as optional extra `local`
+(MLX needs Apple's Metal GPU, so the Linux CI machine must not install it).
+
+- Server process memory: **2.12 GB** (estimate: ~4B params x 0.5 bytes = ~2 GB + runtime overhead).
+- Memory pressure: **yellow** during these runs -> numbers below are noisy.
+- Open: a 394 MB figure was seen in Activity Monitor; column not yet confirmed (if Compressed Memory,
+  macOS was compressing the server's memory, which adds latency).
+
+Cold vs. warm (same request 3x after a server restart, `/no_think`, max_tokens 30, n=3):
+
+| Run | Total time | cached_tokens | completion_tokens | finish_reason |
+| --- | --- | --- | --- | --- |
+| 1 (cold) | 1.044 s | 0 / 18 | 14 | stop |
+| 2 | 0.732 s | 17 / 18 | 14 | stop |
+| 3 | 0.745 s | 17 / 18 | 14 | stop |
+
+- Runs 2-3 reused 17 of 18 prompt tokens: **prefix caching** working locally.
+- Most of the ~0.3 s gap is likely cold-start setup, not caching: prefilling 18 tokens costs only milliseconds.
+  Caching should only matter at thousands of tokens (to test in Step 3).
+- The last prompt token is typically not cached: the model must run it to produce the next token.
+- `time` showed ~1-2% CPU for curl: the client just waits; wall-clock `total` is the number that matters.
+
+Thinking mode on (no `/no_think`, max_tokens 30):
+
+- `finish_reason: "length"`, `content: null`, all 30 tokens spent in `reasoning`. **The answer was never written.**
+- Thinking tokens cost decode time and count against `max_tokens`.
+- First ARL check to build: a response with `finish_reason == "length"` is a failure, not a result.
+
+Mistake made and fixed: the first attempt compared with/without `/no_think` where the first request was
+also the cold one, so two variables changed at once (a confounded experiment).
+
+Quality note: asked for "hi in five words", got "Hello! How can I assist you today?" (7 words) plus leading
+newlines. Small-tier instruction-following must be measured by evals (M1.4) before trusting it for routing.
+
+KV cache memory (to verify against the model's config.json):
+bytes/token ~= 2 x layers x KV heads x head_dim x 2 bytes. If Qwen3-4B is 36 layers, 8 KV heads, head_dim 128:
+~0.14 MB/token, so a 3,000-token prompt adds ~0.4 GB on top of the weights.
+
+### Step 2: Read a raw stream (2026-11-23)
+
+Two streamed requests (`"stream": true`, `curl -N`): "Count from 1 to 5." with `/no_think` (max_tokens 40)
+and without it (max_tokens 200).
+
+1. **Before any data:** lines like `: keepalive 16/17`. Lines starting with `:` are SSE comments, not tokens.
+   They arrive while the prompt is processed; the x/y counts look like prompt-processing progress
+   (17 tokens for the first request, only 5 for the second, which matches prefix caching). To verify.
+   First `data:` chunk: `{"role": "assistant", "reasoning": "\n\n"}`: an empty thinking block, even with `/no_think`.
+2. **About one token per chunk:** `"1"`, `","`, `" 2"`, ... Counting chunks approximates tokens.
+3. **End of stream:** a chunk with `finish_reason: "stop"` and an empty delta, then `data: [DONE]`.
+   No `usage` in the stream, so token counts must be requested (`stream_options.include_usage`, check if
+   mlx-lm supports it) or approximated by counting chunks.
+4. **Thinking on:** ~139 `reasoning` chunks arrived before the first `content` chunk (11 content chunks).
+   The visible answer starts only after the whole reasoning is generated: about 139 x TPOT of extra wait.
+5. **`created` is the same second for every chunk**, so the server's timestamps can't measure TTFT.
+   Timing must come from the client's own clock.
+
+Two possible TTFT definitions:
+
+- **Model TTFT:** first delta with any generated text (reasoning or content). Measures prefill.
+- **User-visible TTFT:** first `content` delta that isn't only whitespace. Measures what a user waits for.
+
+**Decision (2026-11-23):** record both. The headline number is **user-visible TTFT**: time from sending the
+request to the first non-whitespace `content` delta, because that is what a person waits for. Model TTFT is
+kept alongside it to separate prompt processing from thinking time. Baseline benchmarks run with thinking off.
+Later, the first tool-call delta also counts as "visible".
+
+### Step 3: measure.py against Claude (2026-11-24)
+
+Script: `scripts/measure.py` (every setting is a flag). Short prompt "Count from 1 to 5.", max_tokens 60,
+1 warm-up discarded, n=10 per row. Network: home connection in India to the Anthropic API.
+
+| Model | Prompt tokens | Median ttft_visible | Min - max | Median total |
+| --- | --- | --- | --- | --- |
+| Sonnet 5.5 | 18 | 895 ms | 793 - 1303 | 1370 ms |
+| Sonnet 5.5 | 1,524 | 820 ms | 690 - 1175 | 840 ms |
+| Sonnet 5.5 | 4,530 | 803 ms | 724 - 929 | 852 ms |
+| Haiku 5.5 | 18 | 702 ms | 664 - 730 | 753 ms |
+
+Findings:
+
+1. **Prompt length did not change TTFT** (895 -> 820 -> 803 ms from 18 to 4,530 tokens). On the provider's GPUs,
+   processing 4.5k prompt tokens costs far less than the variation between runs. A fixed floor of roughly
+   700-900 ms (network round trip, TLS, queueing, API overhead) dominates.
+2. **The rows were run one after another**, so time of day and network drift are mixed into the comparison.
+   The 18-token row was also the first experiment of the session. Fix: `--pad-words 0,750,2250` now
+   interleaves settings in a shuffled order every round.
+3. **Warm-up runs were slower every time** (1137, 882, 927, 988 ms): the first request opens the HTTPS
+   connection. Reusing one client matters.
+4. **Claude streams in bursts.** With `--events`, the whole 15-token answer arrived in two deltas
+   (`'1, 2, 3,'` at 1132 ms, `' 4, 5'` at 1569 ms). Several tokens per event, unlike mlx-lm's one per chunk.
+5. **The TPOT numbers above are invalid** (0.0-37 ms). When the answer arrives in 1-2 deltas, "first to last
+   delta / tokens" measures delivery batching, not generation speed. Fixed in the script: TPOT is shown only
+   with >= 5 text deltas, and `--long` asks for a ~300-word answer.
+6. **Haiku 5.5 started ~190 ms sooner than Sonnet 5.5** for a short prompt (702 vs 895 ms). Same network floor,
+   so the gap is on the provider side. Run again interleaved before relying on it.
+
+What this means for the project:
+
+- On a hosted API, **prefix caching will not cut TTFT at a few thousand tokens**; the floor dominates. Its benefit
+  is cost (cache reads are billed at a fraction of normal input), plus TTFT only at much longer prompts. The original
+  "cut TTFT with prefix caching" story does not hold here, and the resume must not claim it.
+- In an agent, **each sequential model call pays the ~0.8 s floor.** Five calls is ~4 s before any thinking.
+  The bigger wins are fewer round trips, parallel tool calls and streaming. M3.4 should be prioritized that way.
+- Locally there is no network floor, so prompt length should matter a lot more (prediction for Step 4).
+
+### Step 3b: interleaved runs and long answers (2026-11-24)
+
+Settings run in a shuffled order every round (`--seed 1`), n=10 per setting unless noted.
+
+| Experiment | Setting | Median ttft_visible | Median total |
+| --- | --- | --- | --- |
+| Prompt length | Sonnet 5.5, 18 tokens | 923 ms | 1463 ms |
+| Prompt length | Sonnet 5.5, 1,524 tokens | 823 ms | 900 ms |
+| Prompt length | Sonnet 5.5, 4,530 tokens | 852 ms | 893 ms |
+| Model | Sonnet 5.5, 18 tokens | 715 ms | 799 ms |
+| Model | Haiku 5.5, 18 tokens | 704 ms | 757 ms |
+| Long answer (n=5) | Haiku 5.5, max_tokens 600 | 742 ms | 4632 ms, TPOT 7.1 ms |
+| Long answer (n=5) | Sonnet 5.5, max_tokens 600 | none: 5/5 cut off before any text | 7252 ms |
+
+Findings:
+
+1. **Interleaved, prompt length still doesn't move TTFT** up to 4,530 tokens. Confirmed.
+2. **Interleaved, Sonnet and Haiku start at the same time** (715 vs 704 ms). The ~190 ms gap from the
+   sequential runs was time drift, not the model. Interleaving removed a false conclusion.
+3. **Haiku 5.5 generates at ~140 tokens/s** (TPOT 7.1 ms, min-max 7.0-7.3, n=5).
+4. **Sonnet 5.5 never wrote any text in 600 tokens.** Cause (docs): Claude 5.x models think by default
+   (adaptive thinking), and on Sonnet 5.5 the thinking text is hidden (`display: "omitted"`). The stream only
+   carried empty `thinking_delta`s plus a `signature_delta`, which the script ignored, and the 600-token budget
+   ran out during thinking. Hidden thinking is still billed.
+5. Unexplained: with the 18-token prompt, total time is ~500 ms longer than with padding (1463 vs ~900 ms)
+   at the same 15 output tokens. Check with `--events` whether the short-prompt answer arrives in two bursts.
+
+Script changes:
+
+- `--thinking off` sends `{"type": "between_tools"}` (Sonnet 5.5 rejects `{"type": "disabled"}`);
+  `--thinking summarized` shows thinking summaries.
+- Each run prints `thinking=` tokens (from `usage.output_tokens_details`). TPOT now uses answer tokens only
+  (output minus thinking), timed from the first visible text.
+- `ttft_model` now starts at the thinking block when the thinking text is hidden.
+- A run cut off before any answer text gets its own warning.
+
+Lesson for the agent: a default `max_tokens` that looks generous can be spent entirely on hidden thinking,
+returning nothing. ARL needs a check for "cut off with no answer", and the agent must set its thinking mode
+and token budget deliberately per call.
+
+Next experiments:
+
+- [ ] `uv run python scripts/measure.py --runs 5 --long --thinking off --model claude-sonnet-5-5,claude-haiku-5-5 --seed 1`
+- [ ] `uv run python scripts/measure.py --runs 5 --long --max-tokens 4000 --model claude-sonnet-5-5` (default thinking)
+- [ ] `uv run python scripts/measure.py --runs 1 --warmup 0 --thinking summarized --events --long`
