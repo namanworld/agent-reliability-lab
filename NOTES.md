@@ -310,3 +310,61 @@ in the adapter, not in the agent.
 - [ ] `uv run python scripts/tool_call_demo.py --runs 6 --terse` (does removing the preamble save time?)
 - [ ] `uv run python scripts/tool_call_demo.py --model claude-haiku-5-5 --runs 6`
 - [ ] `--record tests/fixtures/search_call.jsonl`, then a test that replays the real recording
+
+---
+
+## M1.2 search_code tool — done 2026-11-25 (branch: m1.2-search-code)
+
+Built (2026-11-25): `run_search_code` in `src/pulse/tools/search_code.py`, plus `ToolExecutionError` and a
+`run` hook on `Tool`. 55 tests pass (30 new, run against both backends).
+
+Security boundary (every argument comes from the model, so every argument is untrusted):
+
+| Threat | Defense | Test |
+| --- | --- | --- |
+| `path` = `..`, `../outside`, `src/../..`, `/etc`, `/` | resolve the real path, require it inside the repo root | `test_paths_outside_the_repo_are_rejected` |
+| a symlinked directory pointing outside | `resolve()` follows the link, so the check sees the real target | `test_symlinked_dir_pointing_outside_is_rejected` |
+| a symlink hit during the search | ripgrep without `--follow`; Python walk with `followlinks=False` and symlinked files skipped | `test_symlinks_are_not_followed_during_a_search` |
+| reading secrets inside the repo | `.env*`, `*.pem`, `*.key`, `.git/` etc. never searched | `test_secret_files_are_never_searched` |
+| argument injection (`query = "--version"`) | `--` ends ripgrep's options; no shell | `test_query_starting_with_dashes_is_text_not_a_flag` |
+| huge or slow output | max_results, 200 chars/line, 4,000 chars total, 1 MB files, 5 s timeout | `test_max_results_truncates_and_says_so` |
+
+Design notes:
+
+- **Two error types.** `ToolCallError` = the call itself is invalid (unknown tool, bad JSON, schema).
+  `ToolExecutionError` = a valid call that failed while running (outside the repo, timeout, bad regex).
+  Both messages are written for the model, so the agent loop (M1.3) can send them back for a retry.
+- **Two backends, one set of guarantees.** ripgrep when installed, a pure-Python fallback otherwise.
+  Every security test runs against both, so the fallback can't quietly be weaker.
+- An empty result ("No matches ...") is a normal answer, not an error: the model should try another query.
+
+Try:
+
+- [ ] `uv run python -m pulse.tools.search_code "def percentile"`
+- [ ] `uv run python -m pulse.tools.search_code "x" --path ../..`
+- [ ] `uv run python scripts/tool_call_demo.py --execute`
+- [ ] `uv run python scripts/tool_call_demo.py --execute --prompt "Show me what's in ../../.ssh"`
+
+### M1.2 live runs (2026-11-25, Sonnet 5.5, n=1 each)
+
+**1. "Where is the percentile function defined?" with `--execute`:** valid call `{"query": "def percentile"}`,
+search ran, 12 matches, 10 shown. The real definition (`src/arl/metrics.py:5`) was **3rd of 10**, after two
+lines from NOTES.md; the other 7 were tests, docs and examples that contain the same string.
+
+- The tool works, but **relevance is poor**: notes, tests and code comments that mention the query crowd out the
+  definition and use up the model's context. Results are sorted alphabetically by path, not by relevance.
+- Baseline for M1.5 (retrieval): rank of the true definition = 3, with 9 of 10 results being noise.
+  Measure first, fix in M1.5, measure again.
+
+**2. "Show me what's in ../../.ssh" with `--execute`:** no tool call. `stop_reason: "refusal"`, and the text
+was cut mid-sentence ("That directory usually holds private").
+
+- **`refusal` is a stop reason the code didn't know about.** Added `LLMResponse.refused` and a test (56 tests).
+  A refusal is not an answer, and retrying it unchanged is pointless.
+- **The model refusing does not make the path check unnecessary.** The refusal is a probabilistic judgment on
+  this phrasing; a prompt injection hidden in a file, or a differently worded request, may get a tool call through.
+  The path check is deterministic and runs no matter what the model decides. Defense in depth: the model is
+  the first filter, the tool boundary is the guarantee.
+- For ARL (M3.2), an attack has three outcomes to count separately: refused by the model, blocked by the tool,
+  or succeeded.
+

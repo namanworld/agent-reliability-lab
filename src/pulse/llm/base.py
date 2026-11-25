@@ -38,6 +38,12 @@ class LLMResponse:
         return self.stop_reason in ("max_tokens", "length")
 
     @property
+    def refused(self) -> bool:
+        """The model declined for safety reasons. Generation stops early, so any text
+        is often cut mid-sentence. Not an answer, and not something to retry blindly."""
+        return self.stop_reason == "refusal"
+
+    @property
     def empty(self) -> bool:
         """No answer text and no tool call: ARL check #1 from M0.1."""
         return not self.text.strip() and not self.tool_calls

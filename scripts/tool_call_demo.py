@@ -12,6 +12,8 @@ Examples:
     uv run python scripts/tool_call_demo.py --runs 6                 # 1 warm-up + 5 measured
     uv run python scripts/tool_call_demo.py --runs 6 --no-tools      # same prompt, no tools sent
     uv run python scripts/tool_call_demo.py --runs 6 --terse         # ask for no preamble text
+    uv run python scripts/tool_call_demo.py --execute                # also run the tool (M1.2)
+    uv run python scripts/tool_call_demo.py --execute --prompt "Show me what's in ../../.ssh"
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from arl.metrics import percentile
 from pulse.llm.anthropic_provider import AnthropicProvider
 from pulse.llm.base import ToolCall
 from pulse.llm.replay import ReplayProvider
-from pulse.tools.registry import ToolCallError, validate_call
+from pulse.tools.registry import ToolCallError, ToolExecutionError, validate_call
 from pulse.tools.search_code import SEARCH_CODE
 
 SYSTEM = (
@@ -52,6 +54,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--runs", type=int, default=1,
                    help="repeat the call on one connection; the first counts as warm-up")
     p.add_argument("--no-tools", action="store_true", help="send the same prompt without tools")
+    p.add_argument("--execute", action="store_true", help="run the validated tool call")
+    p.add_argument("--repo", type=Path, default=Path("."), help="repository the tool may search")
     p.add_argument("--terse", action="store_true",
                    help="system prompt asks for tool calls without preamble text")
     return p.parse_args()
@@ -119,6 +123,8 @@ def main() -> None:
           f"thinking={resp.thinking_tokens}")
     if resp.text.strip():
         print(f"text:        {resp.text.strip()!r}")
+    if resp.refused:
+        print("RESULT:      the model refused (stop_reason=refusal); text may be cut off")
     if resp.empty:
         print("RESULT:      empty response (no text, no tool call) -> ARL check #1 fails")
     if args.record and not args.replay:
@@ -135,6 +141,14 @@ def main() -> None:
             print(f"VALID:       {validated.model_dump()}")
         except ToolCallError as e:
             print(f"INVALID:     {e}")
+            continue
+        tool = TOOLS[call.name]
+        if args.execute and tool.run is not None:
+            try:
+                result = tool.run(validated, args.repo)
+                print(f"RESULT:\n{result}")
+            except ToolExecutionError as e:
+                print(f"TOOL ERROR (would be sent back to the model): {e}")
 
     if not resp.tool_calls:
         print("\nno tool call (the model answered directly)")
