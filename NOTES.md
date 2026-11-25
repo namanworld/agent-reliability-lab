@@ -186,8 +186,46 @@ Lesson for the agent: a default `max_tokens` that looks generous can be spent en
 returning nothing. ARL needs a check for "cut off with no answer", and the agent must set its thinking mode
 and token budget deliberately per call.
 
-Next experiments:
+### Step 3c: thinking on vs. off, long answers (2026-11-25)
 
-- [ ] `uv run python scripts/measure.py --runs 5 --long --thinking off --model claude-sonnet-5-5,claude-haiku-5-5 --seed 1`
-- [ ] `uv run python scripts/measure.py --runs 5 --long --max-tokens 4000 --model claude-sonnet-5-5` (default thinking)
-- [ ] `uv run python scripts/measure.py --runs 1 --warmup 0 --thinking summarized --events --long`
+"Write a 300-word story about a lighthouse keeper.", max_tokens 600, n=5.
+
+| Setting | Median ttft_visible | Median TPOT | Median total | Runs cut off |
+| --- | --- | --- | --- | --- |
+| Sonnet 5.5, thinking default | none (no answer text) | - | 7951 ms | 5/5, all 600 tokens thinking |
+| Haiku 5.5, thinking default | 1183 ms (1 run) | 6.6 ms (1 run) | 5671 ms | 4/5, all 600 tokens thinking |
+| Sonnet 5.5, thinking off | 834 ms | 10.3 ms | 6872 ms | 1/5 (answer hit 600) |
+
+Findings:
+
+1. **With default thinking, a 600-token budget produced no answer in 9 of 10 runs**, on both models.
+   Haiku thinks by default too. The one Haiku run that skipped thinking answered in 4.1 s.
+2. **Thinking off, Sonnet 5.5 generates at ~10.3 ms/token (~97 tokens/s)**, vs. Haiku 5.5 at ~6.6-7.1 ms
+   (~140-150 tokens/s). Same TTFT, so Haiku is ~1.5x faster at generating, and much cheaper.
+3. **With hidden thinking, `ttft_model` is unreliable.** One Haiku run reported the thinking block starting at
+   5669 ms with the run ending at 5671 ms: the stream can stay silent until thinking is done. The "start of the
+   thinking block" is not when generation began. Treat hidden-thinking runs as "no visible timing", not as data.
+4. Outlier: one thinking-off Sonnet run had TTFT 3217 ms (others 657-919). The median handles it.
+
+## M0.1 summary — done 2026-11-25 (Claude only; local comparison deferred to M1.1)
+
+Baseline from India to the Anthropic API, short prompts unless noted:
+
+| Measure | Sonnet 5.5 | Haiku 5.5 |
+| --- | --- | --- |
+| User-visible TTFT (median, interleaved) | ~715-920 ms | ~700 ms |
+| TTFT change from 18 to 4,530 prompt tokens | none measurable | not measured |
+| Generation speed, thinking off | ~10.3 ms/token | ~6.6-7.1 ms/token |
+| Default thinking on a 600-token budget | 5/5 runs no answer | 4/5 runs no answer |
+
+Design rules this produced:
+
+1. **Latency per agent turn ~= number of sequential model calls x ~0.8 s floor + generation time.**
+   Optimize call count and parallelism first (M3.4), not prompt caching.
+2. **Set thinking mode and max_tokens on every call.** Thinking off for routine tool calls; thinking on only
+   for hard planning steps, with a budget that leaves room for the answer.
+3. **Routing to Haiku saves cost and generation time, not time-to-first-token.**
+4. **ARL check #1:** a call that stops at max_tokens with no answer text is a failure.
+
+Deferred: the local Qwen3-4B comparison (does prompt length matter without a network floor?) runs when the
+local provider adapter is built in M1.1.

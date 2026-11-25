@@ -31,7 +31,8 @@ Definitions (see NOTES.md, M0.1 Step 2):
 Claude 5.x models think by default (adaptive thinking), and on Sonnet 5.5 the
 thinking text is hidden by default: the stream carries empty thinking deltas while
 the tokens are still generated and billed. --thinking off sends
-{"type": "between_tools"}, which turns off up-front thinking.
+the right "off" value for each model: {"type": "between_tools"} on Sonnet 5.5,
+{"type": "disabled"} on Haiku 5.5 (see pulse.llm.anthropic_provider.THINKING_OFF).
 
 Comma-separated --model / --pad-words values are run interleaved: every round runs
 each setting once in a shuffled order, so slow minutes on the network hit all
@@ -50,6 +51,7 @@ from functools import cache
 from itertools import product
 
 from arl.metrics import percentile
+from pulse.llm.anthropic_provider import thinking_off_param
 
 FILLER = "The quick brown fox jumps over the lazy dog. "  # 9 words
 DEFAULT_MODELS = {"anthropic": "claude-sonnet-5-5", "local": "default_model"}
@@ -129,7 +131,7 @@ def run_anthropic(args: argparse.Namespace, model: str, prompt: str) -> RunResul
     t0 = time.perf_counter()
     extra = {}
     if args.thinking == "off":
-        extra["thinking"] = {"type": "between_tools"}
+        extra["thinking"] = thinking_off_param(model)  # differs per model
     elif args.thinking == "summarized":
         extra["thinking"] = {"type": "adaptive", "display": "summarized"}
     stream = client.messages.create(
@@ -321,8 +323,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bust-cache", action="store_true",
                    help="unique prefix per run so prefix caching can't help")
     p.add_argument("--thinking", choices=["default", "off", "summarized"], default="default",
-                   help="Claude only: default=model decides (hidden on Sonnet 5.5), "
-                        "off=between_tools, summarized=show thinking summaries")
+                   help="Claude only: default=model decides (hidden on 5.5 models), "
+                        "off=no up-front thinking, summarized=show thinking summaries")
     p.add_argument("--think", action="store_true",
                    help="local only: leave Qwen3 thinking on (default adds /no_think)")
     p.add_argument("--base-url",
