@@ -16,6 +16,7 @@ from pathlib import Path
 
 from pulse.agent import Agent, Step, trace_to_json
 from pulse.llm.anthropic_provider import AnthropicProvider
+from pulse.tools.find_code import FIND_CODE
 from pulse.tools.read_file import READ_FILE
 from pulse.tools.search_code import SEARCH_CODE
 
@@ -48,6 +49,7 @@ def main() -> None:
     p.add_argument("--max-tokens", type=int, default=1024, help="per model call")
     p.add_argument("--thinking", choices=["off", "default"], default="off")
     p.add_argument("--trace", type=Path, help="write the full run as JSON")
+    p.add_argument("--no-find-code", action="store_true", help="leave out find_code (the M1.4 setup)")
     p.add_argument("--quiet", action="store_true", help="print only the answer")
     a = p.parse_args()
 
@@ -60,7 +62,7 @@ def main() -> None:
 
     agent = Agent(
         AnthropicProvider(model=a.model),
-        [SEARCH_CODE, READ_FILE],
+        [SEARCH_CODE, READ_FILE] + ([] if a.no_find_code else [FIND_CODE]),
         a.repo,
         max_steps=a.max_steps,
         max_seconds=a.max_seconds,

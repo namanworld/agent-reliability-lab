@@ -9,6 +9,7 @@ Examples:
     uv run python scripts/run_evals.py --no-redact --category boundary   # see the leak redaction fixes
     uv run python scripts/run_evals.py --runs 3                          # each case 3x (consistency)
     uv run python scripts/run_evals.py --out evals/results               # save every trace as JSONL
+    uv run python scripts/run_evals.py --no-find-code                    # M1.4 setup, for before/after
 
 The run never prints tool outputs, so a leaked secret is reported as "leak: ..."
 without the secret itself being shown on screen.
@@ -26,6 +27,7 @@ from arl.metrics import percentile
 from pulse.agent import Agent, AgentResult
 from pulse.evals import EvalCase, check, load_suite
 from pulse.llm.anthropic_provider import AnthropicProvider
+from pulse.tools.find_code import FIND_CODE
 from pulse.tools.read_file import READ_FILE
 from pulse.tools.search_code import SEARCH_CODE
 
@@ -44,7 +46,7 @@ def cost_usd(model: str, tin: int, tout: int) -> float | None:
 def run_case(model: str, case: EvalCase, args) -> tuple[AgentResult | None, list[str], str | None]:
     agent = Agent(
         AnthropicProvider(model=model),
-        [SEARCH_CODE, READ_FILE],
+        [SEARCH_CODE, READ_FILE] + ([] if args.no_find_code else [FIND_CODE]),
         args.repo,
         max_steps=case.max_steps,
         redact_output=not args.no_redact,
@@ -64,6 +66,7 @@ def main() -> None:
     p.add_argument("--category", choices=["task", "boundary", "no_tool"])
     p.add_argument("--runs", type=int, default=1, help="run each case N times")
     p.add_argument("--no-redact", action="store_true", help="turn off secret redaction (to see leaks)")
+    p.add_argument("--no-find-code", action="store_true", help="leave out find_code (the M1.4 setup)")
     p.add_argument("--repo", type=Path, default=Path("."))
     p.add_argument("--out", type=Path, help="directory for a JSONL file of results and traces")
     p.add_argument("-v", "--verbose", action="store_true", help="print the answer for failed cases")
@@ -85,13 +88,23 @@ def main() -> None:
         cases = [c for c in cases if c.category == args.category]
     models = [m.strip() for m in args.model.split(",")]
 
+    if not args.no_find_code:
+        # Build (or refresh) the search index before timing any case, so a one-off
+        # embedding cost isn't charged to whichever case happens to call find_code first.
+        from pulse.tools.find_code import get_index
+
+        t0 = time.perf_counter()
+        index, _ = get_index(args.repo)
+        print(f"search index ready: {len(index.chunks)} chunks, {index.reembedded} embedded now, "
+              f"{time.perf_counter() - t0:.1f} s")
+
     out_file = None
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
         out_file = (args.out / f"{suite.name}_{time.strftime('%Y%m%d-%H%M%S')}.jsonl").open("w")
 
     print(f"suite={suite.name} cases={len(cases)} runs={args.runs} models={models} "
-          f"redaction={'off' if args.no_redact else 'on'}\n")
+          f"redaction={'off' if args.no_redact else 'on'} find_code={'off' if args.no_find_code else 'on'}\n")
 
     summary = {}
     for model in models:

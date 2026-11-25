@@ -14,6 +14,25 @@ from pulse.tools.registry import ToolExecutionError
 
 BLOCKED_GLOBS = [".env*", "*.pem", "*.key", "id_rsa*", "*.p12"]
 BLOCKED_DIRS = {".git", ".venv", "node_modules", "__pycache__"}
+# Readable with read_file, but left out of searches and the index:
+# - evals/: eval questions and attack fixtures. Searchable eval data leaks the test
+#   into the answer (a retrieval query would find itself in retrieval.yaml), and the
+#   injection fixture showed up in unrelated searches in M1.4.
+# - .pulse_index/: the search index's own cache.
+SEARCH_SKIPPED_DIRS = {"evals", ".pulse_index"}
+
+
+def path_weight(rel_path: str) -> float:
+    """How likely a file is to be the answer: code > scripts > tests > notes and evals."""
+    if rel_path.startswith("src/"):
+        return 1.0
+    if rel_path.startswith("scripts/"):
+        return 0.8
+    if rel_path.startswith("tests/"):
+        return 0.6
+    if rel_path.endswith(".md") or rel_path.startswith("evals/"):
+        return 0.4
+    return 0.7
 
 
 def is_blocked(rel_path: str) -> bool:
