@@ -132,3 +132,23 @@ def test_real_recording_replays_to_a_valid_call():
     assert "percentile" in args.query
     assert resp.ttft_ms is not None and resp.total_ms is not None
     assert resp.ttft_ms < resp.total_ms
+
+
+def test_assistant_turn_is_rebuilt_for_the_next_request():
+    resp = parse_events(load_recording(FIXTURE))
+    assert resp.content_blocks == [
+        {"type": "text", "text": "I'll search for it."},
+        {"type": "tool_use", "id": "toolu_fixture1", "name": "search_code",
+         "input": {"query": "def percentile", "path": "src"}},
+    ]
+
+
+def test_thinking_block_keeps_its_signature():
+    events = [
+        (None, {"type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+        (None, {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": ""}}),
+        (None, {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "abc"}}),
+        (None, {"type": "content_block_stop", "index": 0}),
+    ]
+    assert parse_events(events).content_blocks == [{"type": "thinking", "thinking": "", "signature": "abc"}]

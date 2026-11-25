@@ -45,6 +45,7 @@ def parse_events(timed_events: Iterable[TimedEvent]) -> LLMResponse:
     resp = LLMResponse()
     open_tools: dict[int, dict[str, Any]] = {}  # block index -> partial tool call
     order: list[int] = []
+    blocks: dict[int, dict[str, Any]] = {}  # block index -> block being rebuilt
 
     def mark_visible(ms: float | None) -> None:
         if resp.ttft_ms is None and ms is not None:
@@ -61,17 +62,33 @@ def parse_events(timed_events: Iterable[TimedEvent]) -> LLMResponse:
             )
         elif etype == "content_block_start":
             block = ev["content_block"]
-            if block.get("type") == "tool_use":
+            btype = block.get("type")
+            if btype == "text":
+                blocks[ev["index"]] = {"type": "text", "text": ""}
+            elif btype == "thinking":
+                blocks[ev["index"]] = {"type": "thinking", "thinking": "", "signature": ""}
+            elif btype == "redacted_thinking":
+                blocks[ev["index"]] = {"type": "redacted_thinking", "data": block.get("data", "")}
+            elif btype == "tool_use":
+                blocks[ev["index"]] = {"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}
+            if btype == "tool_use":
                 open_tools[ev["index"]] = {"id": block["id"], "name": block["name"], "json": ""}
                 order.append(ev["index"])
                 mark_visible(ms)
         elif etype == "content_block_delta":
             delta = ev["delta"]
+            block = blocks.get(ev.get("index", -1), {})
             if delta.get("type") == "text_delta":
                 text = delta.get("text", "")
                 resp.text += text
+                if block.get("type") == "text":
+                    block["text"] += text
                 if text.strip():
                     mark_visible(ms)
+            elif delta.get("type") == "thinking_delta" and block.get("type") == "thinking":
+                block["thinking"] += delta.get("thinking", "")
+            elif delta.get("type") == "signature_delta" and block.get("type") == "thinking":
+                block["signature"] += delta.get("signature", "")
             elif delta.get("type") == "input_json_delta":
                 open_tools[ev["index"]]["json"] += delta.get("partial_json", "")
         elif etype == "message_delta":
@@ -86,7 +103,17 @@ def parse_events(timed_events: Iterable[TimedEvent]) -> LLMResponse:
     for index in order:
         t = open_tools[index]
         # A tool with no arguments streams no JSON at all; that means "{}".
-        resp.tool_calls.append(ToolCall(id=t["id"], name=t["name"], arguments_json=t["json"] or "{}"))
+        args_json = t["json"] or "{}"
+        resp.tool_calls.append(ToolCall(id=t["id"], name=t["name"], arguments_json=args_json))
+        try:
+            parsed = json.loads(args_json)
+        except json.JSONDecodeError:
+            parsed = {}  # the history needs an object; the error goes back in the tool_result
+        blocks[index]["input"] = parsed if isinstance(parsed, dict) else {}
+    resp.content_blocks = [
+        b for _, b in sorted(blocks.items())
+        if not (b["type"] == "text" and not b["text"])  # the API rejects empty text blocks
+    ]
     return resp
 
 
@@ -120,6 +147,7 @@ class AnthropicProvider:
         max_tokens: int = 1024,
         thinking: ThinkingMode = "off",
         system: str | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> LLMResponse:
         request: dict[str, Any] = {
             "model": self.model,
@@ -130,6 +158,8 @@ class AnthropicProvider:
             request["tools"] = tools
         if system:
             request["system"] = system
+        if tool_choice:
+            request["tool_choice"] = tool_choice
         if thinking == "off":
             request["thinking"] = thinking_off_param(self.model)
         return parse_events(self._timed_stream(**request))
