@@ -11,3 +11,8 @@ wheels/
 
 # Local environment
 .env
+
+# Eval results contain full traces (tool outputs); keep them out of git
+evals/results/
+traces/
+.pulse_index/

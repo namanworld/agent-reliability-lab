@@ -30,7 +30,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pulse.tools.paths import BLOCKED_DIRS, BLOCKED_GLOBS, is_blocked, resolve_inside
+from pulse.tools.paths import (
+    BLOCKED_DIRS,
+    BLOCKED_GLOBS,
+    SEARCH_SKIPPED_DIRS,
+    is_blocked,
+    path_weight,
+    resolve_inside,
+)
 from pulse.tools.registry import Tool, ToolExecutionError
 
 MAX_LINE_CHARS = 200
@@ -56,6 +63,11 @@ class SearchCodeArgs(BaseModel):
     )
 
 
+def is_search_skipped(rel_path: str) -> bool:
+    rel = Path(rel_path).as_posix()
+    return any(rel == d or rel.startswith(d + "/") for d in SEARCH_SKIPPED_DIRS)
+
+
 # ---------- backends: each returns (matches, error); a match is (rel_path, line_no, text) ----------
 
 Match = tuple[str, int, str]
@@ -66,7 +78,7 @@ def search_with_ripgrep(rg: str, root: Path, target: Path, query: str) -> list[M
            "--max-columns", str(MAX_LINE_CHARS), "--max-filesize", "1M"]
     for g in BLOCKED_GLOBS:
         cmd += ["--glob", f"!{g}"]
-    for d in BLOCKED_DIRS:
+    for d in BLOCKED_DIRS | SEARCH_SKIPPED_DIRS:
         cmd += ["--glob", f"!{d}/"]
     # No --follow: symlinks are not traversed. "--" ends the options, so a query
     # starting with "-" can't be read as a flag (argument injection).
@@ -89,7 +101,7 @@ def search_with_ripgrep(rg: str, root: Path, target: Path, query: str) -> list[M
         if not line_no.isdigit():
             continue
         rel = os.path.relpath(file_part, root)
-        if not is_blocked(rel):
+        if not is_blocked(rel) and not is_search_skipped(rel):
             matches.append((rel, int(line_no), text))
     return matches
 
@@ -101,7 +113,11 @@ def search_with_python(root: Path, target: Path, query: str) -> list[Match]:
         raise ToolExecutionError(f"Invalid regular expression: {e}") from e
     matches: list[Match] = []
     for dirpath, dirnames, filenames in os.walk(target, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if d not in BLOCKED_DIRS and not d.startswith("."))
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in BLOCKED_DIRS and not d.startswith(".")
+            and not is_search_skipped(os.path.relpath(Path(dirpath) / d, root))
+        )
         for name in sorted(filenames):
             full = Path(dirpath) / name
             rel = os.path.relpath(full, root)
@@ -137,7 +153,8 @@ def run_search_code(args: SearchCodeArgs, repo_root: Path, backend: str = "auto"
 
     if not matches:
         return f"No matches for {args.query!r} in '{args.path}'."
-    matches.sort()
+    # Source code first, then scripts, tests, and notes last (M1.2: notes outranked the definition).
+    matches.sort(key=lambda m: (-path_weight(m[0]), m[0], m[1]))
     shown = matches[: args.max_results]
     lines = [f"{rel}:{no}: {text.strip()}" for rel, no, text in shown]
     out = "\n".join(lines)

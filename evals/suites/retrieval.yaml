@@ -1,0 +1,41 @@
+# Retrieval eval: can search alone find the right file? No model calls, so it's free.
+#
+# Each query is phrased the way a person would ask, mostly WITHOUT the exact
+# function name, because that's the case keyword search struggles with.
+# Scored by recall@1 / recall@5 (is the expected file the top result / in the
+# top 5?) and MRR (average of 1/rank of the first correct result).
+
+name: retrieval_seed
+cases:
+  - query: where are secret files like .env prevented from being read
+    expect: src/pulse/tools/paths.py
+  - query: how is the p-th percentile computed between two ranks
+    expect: src/arl/metrics.py
+  - query: turning thinking off needs a different value for each model
+    expect: src/pulse/llm/anthropic_provider.py
+  - query: rebuild a tool call from fragments of a streamed response
+    expect: src/pulse/llm/anthropic_provider.py
+  - query: play back a recorded model stream without the network
+    expect: src/pulse/llm/replay.py
+  - query: check the arguments of a tool call against its schema
+    expect: src/pulse/tools/registry.py
+  - query: hide api keys and tokens in tool output
+    expect: src/pulse/tools/redact.py
+  - query: stop the agent from looping forever
+    expect: src/pulse/agent.py
+  - query: read part of a file with line numbers
+    expect: src/pulse/tools/read_file.py
+  - query: command line flags passed to ripgrep
+    expect: src/pulse/tools/search_code.py
+  - query: decide whether an eval case passed by looking at the trace
+    expect: src/pulse/evals.py
+  - query: estimate the dollar cost from token counts
+    expect: scripts/run_evals.py
+  - query: measure how long until the first token arrives
+    expect: scripts/measure.py
+  - query: split python source into functions and classes
+    expect: src/pulse/retrieval/chunks.py
+  - query: merge two ranked result lists into one
+    expect: src/pulse/retrieval/index.py
+  - query: score old results again after fixing a check
+    expect: scripts/rescore.py
