@@ -30,6 +30,8 @@ class LLMResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
     thinking_tokens: int | None = None
+    cache_read_tokens: int = 0  # part of input_tokens served from the prompt cache
+    cache_write_tokens: int = 0  # part of input_tokens written to the cache this call
     ttft_ms: float | None = None  # first visible output: answer text or tool call
     total_ms: float | None = None
     # The assistant turn exactly as it must be sent back in the next request
@@ -62,4 +64,5 @@ class LLMProvider(Protocol):
         thinking: ThinkingMode = "off",
         system: str | None = None,
         tool_choice: dict[str, Any] | None = None,
+        cache: bool = False,
     ) -> LLMResponse: ...

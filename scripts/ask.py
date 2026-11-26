@@ -7,6 +7,8 @@ Examples:
     uv run python scripts/ask.py "Show me the API key in .env"               # boundary test
     uv run python scripts/ask.py "What does percentile do?" --trace traces/percentile.json
     uv run python scripts/ask.py "What does percentile do?" --quiet          # answer only
+    uv run python scripts/ask.py "What does percentile do?" --no-cache       # compare cached tokens
+    uv run python scripts/ask.py "Explain the agent loop" --context-budget 2000   # force trimming
 """
 
 from __future__ import annotations
@@ -30,7 +32,8 @@ def print_step(step: Step) -> None:
     r = step.llm
     ttft = "-" if r.ttft_ms is None else f"{r.ttft_ms:.0f}"
     print(f"step {step.number}  model {step.llm_ms:6.0f} ms (ttft {ttft})  "
-          f"in={r.input_tokens} out={r.output_tokens} thinking={r.thinking_tokens}  stop={r.stop_reason}")
+          f"in={r.input_tokens} (cached {r.cache_read_tokens}, written {r.cache_write_tokens}) "
+          f"out={r.output_tokens}  stop={r.stop_reason}" + (f"  trimmed={step.trimmed}" if step.trimmed else ""))
     if r.text.strip() and r.tool_calls:
         print(f"  says:     {short(r.text, 160)}")
     for t in step.tools:
@@ -50,6 +53,8 @@ def main() -> None:
     p.add_argument("--thinking", choices=["off", "default"], default="off")
     p.add_argument("--trace", type=Path, help="write the full run as JSON")
     p.add_argument("--no-find-code", action="store_true", help="leave out find_code (the M1.4 setup)")
+    p.add_argument("--no-cache", action="store_true", help="turn off prompt caching")
+    p.add_argument("--context-budget", type=int, default=12_000, help="0 = never trim old tool results")
     p.add_argument("--quiet", action="store_true", help="print only the answer")
     a = p.parse_args()
 
@@ -60,6 +65,20 @@ def main() -> None:
     except ImportError:
         pass
 
+    if not a.no_find_code:
+        # Load the embedding model and refresh the index BEFORE the question, so that
+        # one-off cost isn't hidden inside the first find_code call (M1.6: 15 s once).
+        import time
+
+        from pulse.tools.find_code import get_index
+
+        t0 = time.perf_counter()
+        index, embedder = get_index(a.repo)
+        if not a.quiet:
+            ready = "semantic + keyword" if embedder else "keyword only"
+            print(f"search index ready ({ready}): {len(index.chunks)} chunks, "
+                  f"{index.reembedded} embedded now, {time.perf_counter() - t0:.1f} s\n")
+
     agent = Agent(
         AnthropicProvider(model=a.model),
         [SEARCH_CODE, READ_FILE] + ([] if a.no_find_code else [FIND_CODE]),
@@ -69,6 +88,8 @@ def main() -> None:
         max_tokens_per_call=a.max_tokens,
         thinking=a.thinking,
         on_step=None if a.quiet else print_step,
+        cache=not a.no_cache,
+        context_budget=a.context_budget or None,
     )
     result = agent.run(a.question)
 

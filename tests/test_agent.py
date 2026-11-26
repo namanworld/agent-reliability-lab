@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from pulse.agent import REPEAT_NOTE, Agent
+from pulse.agent import REPEAT_NOTE, Agent, add_note, estimate_tokens, trim_context
 from pulse.llm.base import LLMResponse, ToolCall
 from pulse.tools.read_file import READ_FILE
 from pulse.tools.search_code import SEARCH_CODE
@@ -119,7 +119,11 @@ def test_last_step_forbids_tools_so_the_budget_ends_in_an_answer(repo):
     result = make_agent(fake, repo, max_steps=2).run("Where is percentile?")
     assert fake.requests[0].get("tool_choice") is None
     assert fake.requests[1]["tool_choice"] == {"type": "none"}
-    assert "Step budget reached" in fake.requests[1]["system"]
+    # The note goes at the END of the conversation; the system prompt stays identical
+    # so the prompt cache keeps hitting.
+    assert fake.requests[1]["system"] == fake.requests[0]["system"]
+    last_blocks = fake.requests[1]["messages"][-1]["content"]
+    assert last_blocks[-1] == {"type": "text", "text": "Step budget reached: answer now with what you have, without calling tools."}
     assert result.outcome == "answered"
 
 
@@ -145,3 +149,69 @@ def test_trace_contains_every_step_and_tool(repo):
     assert len(trace["steps"]) == 2
     assert trace["steps"][0]["tools"][0]["name"] == "search_code"
     assert trace["tokens"] == {"input": 200, "output": 50}
+
+
+# ---------- context budget (M1.6) ----------
+
+
+def conversation(*result_sizes: int) -> list[dict]:
+    """Question, then one (assistant tool_use, user tool_result) pair per size."""
+    msgs = [{"role": "user", "content": "question"}]
+    for n, size in enumerate(result_sizes):
+        msgs.append({"role": "assistant", "content": [{"type": "tool_use", "id": f"t{n}", "name": "search_code", "input": {}}]})
+        msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{n}",
+                                                  "content": "line\n" * size, "is_error": False}]})
+    return msgs
+
+
+def test_under_budget_nothing_is_trimmed():
+    msgs = conversation(10, 10)
+    assert trim_context(msgs, budget=100_000, keep_recent=1) == 0
+
+
+def test_oldest_results_go_first_and_newest_is_kept():
+    msgs = conversation(2000, 2000, 2000)
+    before = estimate_tokens(msgs)
+    trimmed = trim_context(msgs, budget=before // 2, keep_recent=1)
+    results = [m["content"][0]["content"] for m in msgs if m["role"] == "user" and isinstance(m["content"], list)]
+    assert trimmed >= 1
+    assert results[0].startswith("[earlier tool result removed")
+    assert not results[-1].startswith("[earlier")  # newest always kept
+    assert msgs[0]["content"] == "question"  # question untouched
+    assert estimate_tokens(msgs) < before
+
+
+def test_trimmed_results_keep_their_tool_use_pairing():
+    msgs = conversation(3000, 3000)
+    trim_context(msgs, budget=10, keep_recent=1)
+    assert msgs[2]["content"][0]["tool_use_id"] == "t0"  # still answers its tool_use
+
+
+def test_add_note_copies_instead_of_changing_history():
+    msgs = conversation(1)
+    noted = add_note(msgs, "NOTE")
+    assert noted[-1]["content"][-1] == {"type": "text", "text": "NOTE"}
+    assert all(b.get("text") != "NOTE" for b in msgs[-1]["content"])
+
+
+def test_agent_trims_when_over_budget(repo):
+    big = "x" * 4000
+    (repo / "src" / "big.py").write_text("\n".join(f"VALUE_{i} = '{big}'" for i in range(3)))
+    fake = FakeProvider(
+        tool_turn(("t1", "read_file", '{"path": "src/big.py"}')),
+        tool_turn(("t2", "read_file", '{"path": "src/big.py", "start_line": 2}')),
+        answer("Done."),
+    )
+    result = make_agent(fake, repo, context_budget=200).run("Read big.py")
+    assert result.steps[2].trimmed >= 1
+    first_result = fake.requests[2]["messages"][2]["content"][0]["content"]
+    assert first_result.startswith("[earlier tool result removed")
+
+
+def test_cache_flag_is_passed_to_the_provider(repo):
+    fake = FakeProvider(answer("hi"))
+    make_agent(fake, repo).run("hi")
+    assert fake.requests[0]["cache"] is True
+    fake = FakeProvider(answer("hi"))
+    make_agent(fake, repo, cache=False).run("hi")
+    assert fake.requests[0]["cache"] is False
