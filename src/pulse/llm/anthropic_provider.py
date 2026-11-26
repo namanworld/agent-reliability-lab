@@ -55,11 +55,10 @@ def parse_events(timed_events: Iterable[TimedEvent]) -> LLMResponse:
         etype = ev.get("type")
         if etype == "message_start":
             usage = ev["message"]["usage"]
-            resp.input_tokens = (
-                usage.get("input_tokens", 0)
-                + (usage.get("cache_read_input_tokens") or 0)
-                + (usage.get("cache_creation_input_tokens") or 0)
-            )
+            # input_tokens from the API counts only the uncached part; total = all three.
+            resp.cache_read_tokens = usage.get("cache_read_input_tokens") or 0
+            resp.cache_write_tokens = usage.get("cache_creation_input_tokens") or 0
+            resp.input_tokens = usage.get("input_tokens", 0) + resp.cache_read_tokens + resp.cache_write_tokens
         elif etype == "content_block_start":
             block = ev["content_block"]
             btype = block.get("type")
@@ -148,18 +147,62 @@ class AnthropicProvider:
         thinking: ThinkingMode = "off",
         system: str | None = None,
         tool_choice: dict[str, Any] | None = None,
+        cache: bool = False,
     ) -> LLMResponse:
-        request: dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": max_tokens,
-            "messages": messages,
-        }
-        if tools:
-            request["tools"] = tools
-        if system:
-            request["system"] = system
-        if tool_choice:
-            request["tool_choice"] = tool_choice
-        if thinking == "off":
-            request["thinking"] = thinking_off_param(self.model)
+        request = build_request(self.model, messages, tools=tools, max_tokens=max_tokens,
+                                thinking=thinking, system=system, tool_choice=tool_choice, cache=cache)
         return parse_events(self._timed_stream(**request))
+
+
+CACHE = {"type": "ephemeral"}  # 5-minute cache, refreshed each time it's used
+
+
+def build_request(
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    max_tokens: int = 1024,
+    thinking: ThinkingMode = "off",
+    system: str | None = None,
+    tool_choice: dict[str, Any] | None = None,
+    cache: bool = False,
+) -> dict[str, Any]:
+    """Build the Messages API request. A pure function, so tests can inspect it.
+
+    With cache=True, up to 3 cache breakpoints are set. The API caches everything
+    *up to and including* a marked block, in the order tools -> system -> messages:
+
+      1. the last tool definition  -> caches all tool definitions
+      2. the system prompt         -> caches tools + system
+      3. the last message block    -> caches the whole conversation so far, so the
+                                      next step only pays full price for new turns
+
+    Cached reads cost 0.1x the input price (0.05x on Sonnet 5.5); writing to the
+    cache costs 1.25x. Prompts under 512 tokens are never cached (no error).
+    Inputs are copied, never modified: the caller's message history stays clean.
+    """
+    request: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "messages": messages}
+    if tools:
+        request["tools"] = [dict(t) for t in tools]
+    if system:
+        request["system"] = system
+    if tool_choice:
+        request["tool_choice"] = tool_choice
+    if thinking == "off":
+        request["thinking"] = thinking_off_param(model)
+
+    if cache:
+        if tools:
+            request["tools"][-1]["cache_control"] = CACHE
+        if system:
+            request["system"] = [{"type": "text", "text": system, "cache_control": CACHE}]
+        if messages:
+            msgs = [dict(m) for m in messages]
+            last = msgs[-1]
+            content = last["content"]
+            blocks = [{"type": "text", "text": content}] if isinstance(content, str) else [dict(b) for b in content]
+            blocks[-1]["cache_control"] = CACHE
+            last["content"] = blocks
+            request["messages"] = msgs
+    return request

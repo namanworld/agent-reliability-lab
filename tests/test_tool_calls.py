@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pulse.llm.anthropic_provider import parse_events, thinking_off_param
+from pulse.llm.anthropic_provider import build_request, parse_events, thinking_off_param
 from pulse.llm.base import ToolCall
 from pulse.llm.replay import ReplayProvider, load_recording
 from pulse.tools.registry import ToolCallError, validate_call
@@ -152,3 +152,32 @@ def test_thinking_block_keeps_its_signature():
         (None, {"type": "content_block_stop", "index": 0}),
     ]
     assert parse_events(events).content_blocks == [{"type": "thinking", "thinking": "", "signature": "abc"}]
+
+
+
+# ---------- prompt caching (M1.6) ----------
+
+
+def test_cache_usage_is_split_out_of_input_tokens():
+    events = [(None, {"type": "message_start", "message": {"usage": {
+        "input_tokens": 50, "cache_read_input_tokens": 900, "cache_creation_input_tokens": 300}}})]
+    resp = parse_events(events)
+    assert resp.input_tokens == 1250
+    assert resp.cache_read_tokens == 900 and resp.cache_write_tokens == 300
+
+
+def test_cache_breakpoints_on_tools_system_and_last_message():
+    tools = [{"name": "a", "description": "", "input_schema": {}}, {"name": "b", "description": "", "input_schema": {}}]
+    msgs = [{"role": "user", "content": "q"}]
+    req = build_request("claude-haiku-5-5", msgs, tools=tools, system="sys", cache=True)
+    assert "cache_control" not in req["tools"][0]
+    assert req["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert req["system"] == [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}]
+    assert req["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    # the caller's objects are untouched
+    assert "cache_control" not in tools[-1] and msgs[0]["content"] == "q"
+
+
+def test_no_cache_means_plain_request():
+    req = build_request("claude-haiku-5-5", [{"role": "user", "content": "q"}], system="sys")
+    assert req["system"] == "sys" and req["messages"][0]["content"] == "q"

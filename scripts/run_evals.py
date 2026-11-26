@@ -10,6 +10,8 @@ Examples:
     uv run python scripts/run_evals.py --runs 3                          # each case 3x (consistency)
     uv run python scripts/run_evals.py --out evals/results               # save every trace as JSONL
     uv run python scripts/run_evals.py --no-find-code                    # M1.4 setup, for before/after
+    uv run python scripts/run_evals.py --no-cache                        # M1.6: caching off
+    uv run python scripts/run_evals.py --context-budget 3000             # M1.6: aggressive trimming
 
 The run never prints tool outputs, so a leaked secret is reported as "leak: ..."
 without the secret itself being shown on screen.
@@ -34,13 +36,20 @@ from pulse.tools.search_code import SEARCH_CODE
 # USD per million tokens (input, output), from Anthropic's pricing page, checked 2026-11-22.
 # Haiku's rate is for prompts up to 100K tokens. Update when prices change.
 PRICES = {"claude-sonnet-5-5": (2.00, 10.00), "claude-haiku-5-5": (0.10, 0.50)}
+# Prompt caching, as multiples of the input price (docs, checked 2026-11-26):
+# writing to the 5-minute cache costs 1.25x; reading costs 0.1x (0.05x on Sonnet 5.5).
+CACHE_WRITE = 1.25
+CACHE_READ = {"claude-sonnet-5-5": 0.05, "claude-haiku-5-5": 0.10}
 
 
-def cost_usd(model: str, tin: int, tout: int) -> float | None:
+def cost_usd(model: str, tin: int, tout: int, read: int = 0, write: int = 0) -> float | None:
+    """tin = all input tokens; read/write = the parts served from / written to the cache."""
     if model not in PRICES:
         return None
     pin, pout = PRICES[model]
-    return (tin * pin + tout * pout) / 1_000_000
+    uncached = tin - read - write
+    input_cost = uncached * pin + write * pin * CACHE_WRITE + read * pin * CACHE_READ.get(model, 0.1)
+    return (input_cost + tout * pout) / 1_000_000
 
 
 def run_case(model: str, case: EvalCase, args) -> tuple[AgentResult | None, list[str], str | None]:
@@ -50,6 +59,8 @@ def run_case(model: str, case: EvalCase, args) -> tuple[AgentResult | None, list
         args.repo,
         max_steps=case.max_steps,
         redact_output=not args.no_redact,
+        cache=not args.no_cache,
+        context_budget=args.context_budget or None,
     )
     try:
         result = agent.run(case.question)
@@ -67,6 +78,9 @@ def main() -> None:
     p.add_argument("--runs", type=int, default=1, help="run each case N times")
     p.add_argument("--no-redact", action="store_true", help="turn off secret redaction (to see leaks)")
     p.add_argument("--no-find-code", action="store_true", help="leave out find_code (the M1.4 setup)")
+    p.add_argument("--no-cache", action="store_true", help="turn off prompt caching (M1.6 before/after)")
+    p.add_argument("--context-budget", type=int, default=12_000,
+                   help="estimated tokens before old tool results are trimmed; 0 = never trim")
     p.add_argument("--repo", type=Path, default=Path("."))
     p.add_argument("--out", type=Path, help="directory for a JSONL file of results and traces")
     p.add_argument("-v", "--verbose", action="store_true", help="print the answer for failed cases")
@@ -104,13 +118,15 @@ def main() -> None:
         out_file = (args.out / f"{suite.name}_{time.strftime('%Y%m%d-%H%M%S')}.jsonl").open("w")
 
     print(f"suite={suite.name} cases={len(cases)} runs={args.runs} models={models} "
-          f"redaction={'off' if args.no_redact else 'on'} find_code={'off' if args.no_find_code else 'on'}\n")
+          f"redaction={'off' if args.no_redact else 'on'} find_code={'off' if args.no_find_code else 'on'} "
+          f"cache={'off' if args.no_cache else 'on'} context_budget={args.context_budget or 'off'}\n")
 
     summary = {}
     for model in models:
         print(f"== {model}")
         per_cat: dict[str, list[bool]] = defaultdict(list)
         times, tin, tout, outcomes = [], 0, 0, defaultdict(int)
+        tread = twrite = trimmed = 0
         for case in cases:
             for run in range(1, args.runs + 1):
                 result, failures, outcome = run_case(model, case, args)
@@ -122,6 +138,9 @@ def main() -> None:
                     times.append(result.total_ms)
                     a, b = result.tokens
                     tin, tout = tin + a, tout + b
+                    tread += sum(st.llm.cache_read_tokens for st in result.steps)
+                    twrite += sum(st.llm.cache_write_tokens for st in result.steps)
+                    trimmed += sum(st.trimmed for st in result.steps)
                     steps, ms = len(result.steps), f"{result.total_ms:.0f}"
                 tag = f" #{run}" if args.runs > 1 else ""
                 mark = "PASS" if passed else "FAIL"
@@ -140,7 +159,7 @@ def main() -> None:
 
         all_runs = [x for v in per_cat.values() for x in v]
         rate = sum(all_runs) / len(all_runs) if all_runs else 0.0
-        cost = cost_usd(model, tin, tout)
+        cost = cost_usd(model, tin, tout, tread, twrite)
         summary[model] = (rate, per_cat, times, tin, tout, cost)
         print(f"\n  pass rate: {sum(all_runs)}/{len(all_runs)} = {rate:.0%}")
         for cat, results in sorted(per_cat.items()):
@@ -150,6 +169,8 @@ def main() -> None:
                   f"max {max(times) / 1000:.1f} s (n={len(times)})")
         cost_txt = "unknown" if cost is None else f"${cost:.4f}"
         print(f"  tokens: in={tin} out={tout}  estimated cost: {cost_txt}")
+        share = f"{tread / tin:.0%}" if tin else "-"
+        print(f"  cache: read {tread} ({share} of input), written {twrite}   tool results trimmed: {trimmed}")
         print(f"  outcomes: {dict(outcomes)}\n")
 
     if len(models) > 1:

@@ -36,5 +36,6 @@ class ReplayProvider:
         thinking: ThinkingMode = "off",
         system: str | None = None,
         tool_choice: dict[str, Any] | None = None,
+        cache: bool = False,
     ) -> LLMResponse:
         return parse_events(load_recording(self.path))

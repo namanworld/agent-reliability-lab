@@ -667,3 +667,76 @@ Conclusions:
 
 Decision: keep find_code available (cheap, chosen sensibly by the model), revisit when the eval has headroom.
 
+---
+
+## M1.6 Context budget and prompt caching — done 2026-11-26 (branch: m1.6-context)
+
+Built (2026-11-26): prompt caching in the provider, a context budget in the agent, cache-aware cost in the
+eval runner. 121 tests pass.
+
+**Prompt caching** (`build_request` in anthropic_provider.py). Up to 3 breakpoints, cached in API order
+tools -> system -> messages: the last tool definition, the system prompt, and the last block of the
+conversation. Each step re-reads everything before its newest turn from the cache.
+Docs (checked 2026-11-26): minimum 512 tokens to cache (ours ~1,000); 5-minute lifetime, refreshed on use;
+writes cost 1.25x input, reads 0.1x (0.05x on Sonnet 5.5). The response reports `cache_read_input_tokens`
+and `cache_creation_input_tokens`; `input_tokens` is only the uncached part.
+
+**Keeping the prefix stable.** Anything that changes early in the request invalidates the cache for everything
+after it. The old code appended the "last step" note to the *system prompt*, which would have broken the cache
+on every final step. It now goes at the *end* of the conversation instead.
+
+**Context budget** (`trim_context` in agent.py, default 12,000 estimated tokens). Before each call, if the
+conversation is over budget, the oldest tool results become a one-line note ("removed to save context ... call
+the tool again if you need it"). Never trimmed: the question, the model's own turns (tool_use/tool_result pairs
+must stay matched), and the newest tool-result turn. Size is estimated as characters / 4: exact counts would
+cost an API call per step. Trade-off: trimming edits earlier turns, so it causes one cache miss.
+
+Runs to do:
+
+- [ ] `uv run python scripts/ask.py "What does the percentile function do?" --model claude-haiku-5-5` (cached tokens per step)
+- [ ] `uv run python scripts/run_evals.py --model claude-haiku-5-5 --runs 3 --no-cache` vs. default (cost, pass rate)
+- [ ] `uv run python scripts/run_evals.py --model claude-haiku-5-5 --runs 3 --context-budget 3000` (does trimming hurt?)
+
+### M1.6 results (2026-11-26, Haiku 5.5, 24 cases x 3 = 72 runs per row, all 72/72)
+
+| Setup | Cost | Median/case | Max/case | Input from cache | Trimmed |
+| --- | --- | --- | --- | --- | --- |
+| cache off | $0.0556 | 4.8 s | 19.9 s | 0% | 0 |
+| **cache on** | **$0.0291 (-48%)** | 2.6 s | 6.0 s | 75% | 0 |
+| cache on, budget 3,000 | $0.0293 | 2.4 s | 6.1 s | 72% | 7 |
+
+Median TTFT from the traces: cache off 1,433 ms (step 1) / 1,319 ms (later steps); cache on 664 / 629 ms;
+budget 3,000: 682 / 621 ms.
+
+1. **Caching cut cost by 48% with the pass rate unchanged**, and 75% of input tokens came from the cache.
+   This is the defensible result: n=72 per setup, same suite, same model.
+2. **Latency also roughly halved (median 4.8 -> 2.6 s, TTFT ~1.4 -> ~0.65 s), but that is NOT yet attributable
+   to caching.** The cache-off run happened first, ~10 minutes earlier, and M0.1 showed time-of-day swings of
+   2x. Also, step 1 of each question already reads the tools + system prompt cached by earlier questions, so
+   step 1 vs. later steps doesn't separate the effect either. Check: run cache-off again now (A-B-A). If it is
+   back to ~0.65 s, the speed-up was the network; if it stays ~1.4 s, caching sped things up.
+3. **The cache works as designed in the single run:** step 1 wrote 1,370 tokens (tools + system), step 2 read
+   1,370, step 3 read 2,700 (the earlier conversation too).
+4. **A 3,000-token budget trimmed 7 tool results with no accuracy loss and no cost change.** These conversations
+   are short (~2-3 steps), so the budget is a safety net for long tasks; no savings claim from this suite.
+   Trimming lowered the cache share slightly (75% -> 72%), as expected: each trim causes one cache miss.
+5. **Cold start again:** in the single `ask.py` run, the first find_code call took 15.0 s (loading the embedding
+   model in a fresh process). `ask.py` now loads the model and index before the question and prints the time.
+
+**A-B-A check (cache off again, ~15 min later): median 2.5 s per case, cost $0.0523, 72/72.** Cache-on was 2.6 s.
+So the earlier latency drop (4.8 -> 2.6 s) was the network getting faster, not caching. On this workload,
+caching saves money, not time: consistent with M0.1 (prompt length up to ~4.5k tokens doesn't move TTFT).
+Without the third run, "caching halved latency" would have gone on the resume, and it was false.
+
+Cost across the three runs: cache off $0.0556 and $0.0523, cache on $0.0291, so -44% to -48% depending on
+which baseline. Report the conservative figure.
+
+Resume-ready (measured): "Added prompt caching to a tool-using agent: 75% of input tokens served from cache,
+eval cost down 44% (72 runs per setup, A-B-A design), pass rate unchanged at 72/72. Latency unchanged."
+
+## Phase 1 summary (M1.1-M1.6, 2026-11-25 to 2026-11-26)
+
+PulseAgent: Anthropic provider adapter with record/replay, tool-call validation, search_code / read_file /
+find_code behind one repo boundary, secret redaction, an agent loop with budgets and named outcomes,
+hybrid retrieval, prompt caching and a context budget. 24-case eval suite, offline re-scoring. 121 tests.
+
